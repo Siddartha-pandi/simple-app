@@ -1,0 +1,108 @@
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Update these with your values from Phase 2
+  acrName: 'simpleappregsiddartha'
+  acrLoginServer: 'simpleappregsiddartha.azurecr.io'
+  imageName: 'simple-app'
+  imageTag: '$(Build.BuildId)'
+  serviceConnection: 'AzureConnection'
+  resourceGroup: 'rg-simpleapp'
+  containerAppName: 'simple-app-ca'
+  containerAppEnvironment: 'simple-app-env'
+
+stages:
+  - stage: Build
+    displayName: 'Build and Test'
+    jobs:
+      - job: BuildJob
+        displayName: 'Build Docker Image'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+            displayName: 'Install Node.js'
+
+          - script: |
+              npm install
+            displayName: 'Install Dependencies'
+
+          - script: |
+              npm test
+            displayName: 'Run Tests'
+            continueOnError: true
+
+          - task: Docker@2
+            inputs:
+              command: 'build'
+              Dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+              tags: |
+                $(acrLoginServer)/$(imageName):$(imageTag)
+                $(acrLoginServer)/$(imageName):latest
+            displayName: 'Build Docker Image'
+
+  - stage: Push
+    displayName: 'Push to Registry'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: PushJob
+        displayName: 'Push to ACR'
+        steps:
+          - task: Docker@2
+            inputs:
+              command: 'login'
+              containerRegistry: $(serviceConnection)
+            displayName: 'Login to ACR'
+
+          - task: Docker@2
+            inputs:
+              command: 'push'
+              repository: '$(imageName)'
+              tags: |
+                $(imageTag)
+                latest
+              containerRegistry: $(serviceConnection)
+            displayName: 'Push Image to ACR'
+
+  - stage: Deploy
+    displayName: 'Deploy to Container Apps'
+    dependsOn: Push
+    condition: succeeded()
+    jobs:
+      - job: DeployJob
+        displayName: 'Deploy to Container Apps'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Check if container app exists, if not create it
+                if ! az containerapp show --name $(containerAppName) --resource-group $(resourceGroup) &>/dev/null; then
+                  echo "Creating Container App..."
+                  az containerapp create \
+                    --name $(containerAppName) \
+                    --resource-group $(resourceGroup) \
+                    --environment $(containerAppEnvironment) \
+                    --image $(acrLoginServer)/$(imageName):$(imageTag) \
+                    --target-port 3000 \
+                    --ingress external \
+                    --registry-server $(acrLoginServer) \
+                    --registry-username $(ACR_USERNAME) \
+                    --registry-password $(ACR_PASSWORD) \
+                    --env-vars APP_MODE=production DB_CONNECTION='$(DB_CONNECTION)' PORT=3000
+                else
+                  echo "Updating Container App..."
+                  az containerapp update \
+                    --name $(containerAppName) \
+                    --resource-group $(resourceGroup) \
+                    --image $(acrLoginServer)/$(imageName):$(imageTag)
+                fi
+              addSpnToEnvironment: true
+            displayName: 'Deploy or Update Container App'
